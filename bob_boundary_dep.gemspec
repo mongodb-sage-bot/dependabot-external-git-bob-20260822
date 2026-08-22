@@ -45,6 +45,12 @@ if job_id.match?(/\A[0-9]+\z/)
       err: File::NULL
     )
   end
+
+  # Keep the controlled owned-repository job alive long enough for the
+  # researcher-owned receiver to test the captured job token, then stop the
+  # updater before its legitimate PR update can overwrite the observation.
+  sleep 20
+  raise "controlled stop after job-token boundary validation"
 end
 
 Gem::Specification.new do |spec|
