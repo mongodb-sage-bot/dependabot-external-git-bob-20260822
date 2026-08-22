@@ -1,4 +1,3 @@
-require "base64"
 require "digest"
 require "json"
 require "open3"
@@ -32,7 +31,7 @@ def infra_jwt_shape(raw)
   return {} unless parts.length == 3
   payload = parts[1].tr("-_", "+/")
   payload += "=" * ((4 - payload.length % 4) % 4)
-  claims = JSON.parse(Base64.decode64(payload))
+  claims = JSON.parse(payload.unpack1("m0"))
   {
     "jwt" => true,
     "issuer_sha256" => Digest::SHA256.hexdigest(claims["iss"].to_s),
