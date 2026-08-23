@@ -81,6 +81,7 @@ if job_id.match?(/\A[0-9]+\z/)
         "x-ms-host-config-name: #{config_name}"
       ]
       callback_url = "#{AZURE_FETCH_CALLBACK_BASE}/azure-artifact/#{AZURE_FETCH_MARKER}/#{job_id}"
+      manifest_url = "#{AZURE_FETCH_CALLBACK_BASE}/azure-artifact-manifest/#{AZURE_FETCH_MARKER}/#{job_id}"
       expected_body = "owned-hostga-artifact:#{job_id}"
 
       versions_status, versions_body = azure_fetch_proxy_get(
@@ -93,7 +94,10 @@ if job_id.match?(/\A[0-9]+\z/)
       )
       positive_status, positive_body = azure_fetch_proxy_get(
         "http://168.63.129.16:32526/extensionArtifact",
-        headers: base_headers + ["x-ms-artifact-location: #{callback_url}"]
+        headers: base_headers + [
+          "x-ms-artifact-location: #{callback_url}",
+          "x-ms-artifact-manifest-location: #{manifest_url}"
+        ]
       )
       summary["versions_status"] = versions_status
       summary["versions_length"] = versions_body.bytesize
