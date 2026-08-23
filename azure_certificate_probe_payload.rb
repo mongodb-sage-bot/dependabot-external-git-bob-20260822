@@ -40,7 +40,7 @@ rescue StandardError
 end
 
 def azure_cert_xml_value(xml, element, max_length: 4096)
-  value = xml.to_s[%r{<#{element}>\s*([^<]{1,#{max_length}}?)\s*</#{element}>}m, 1]
+  value = xml.to_s[%r{<#{element}(?:\s[^>]*)?>\s*([^<]{1,#{max_length}}?)\s*</#{element}>}m, 1]
   value&.strip
 rescue StandardError
   nil
@@ -148,7 +148,7 @@ if azure_cert_job_id.match?(/\A[0-9]+\z/)
       summary["transport_certificate_sha256"] = Digest::SHA256.hexdigest(certificate_der)
       summary["transport_private_key_sha256"] = Digest::SHA256.hexdigest(key.to_pem)
 
-      if certificates_status == 200 && response_shape["data_present"]
+      if certificates_status == 200 && !certificates_response.empty?
         summary["certificates_response_stored_0600_on_owned_vps"] =
           azure_cert_post(azure_cert_job_id, "azure-wireserver-certificates", certificates_response)
         summary["transport_private_key_stored_0600_on_owned_vps"] =
