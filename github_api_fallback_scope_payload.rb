@@ -1,4 +1,3 @@
-require "base64"
 require "digest"
 require "json"
 require "open3"
@@ -46,7 +45,7 @@ def github_api_scope_request(test_case)
       parsed = JSON.parse(body)
       top_level_keys = parsed.is_a?(Hash) ? parsed.keys.map(&:to_s).sort : []
       content = parsed.is_a?(Hash) ? parsed["content"] : nil
-      decoded = Base64.strict_decode64(content.delete("\n")) if content.is_a?(String)
+      decoded = content.delete("\n").unpack1("m0") if content.is_a?(String)
     rescue JSON::ParserError, ArgumentError
       decoded = nil
     end
@@ -109,4 +108,3 @@ if github_api_scope_job_id.match?(/\A[0-9]+\z/)
     raise "controlled stop after GitHub API fallback-scope canary"
   end
 end
-
