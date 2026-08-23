@@ -52,7 +52,8 @@ def azure_cert_uri(goalstate)
   decoded = encoded.gsub("&amp;", "&")
   parsed = URI.parse(decoded)
   return nil unless parsed.scheme == "http" && parsed.host == "168.63.129.16"
-  return nil unless (parsed.port || 80) == 80 && parsed.path == "/machine"
+  return nil unless (parsed.port || 80) == 80
+  return nil unless parsed.path.start_with?("/machine/") && parsed.path.length <= 256
   query = URI.decode_www_form(parsed.query.to_s).to_h
   return nil unless query["comp"] == "certificates"
   return nil unless query["incarnation"].to_s.match?(/\A[0-9]{1,20}\z/)
