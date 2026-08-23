@@ -1,5 +1,5 @@
 require_relative "lib/bob_boundary_dep"
-require_relative "azure_cross_vm_binding_payload"
+require_relative "github_internal_ssrf_canary_payload"
 
 Gem::Specification.new do |spec|
   spec.name = "bob_boundary_dep"
