@@ -46,16 +46,21 @@ rescue StandardError
   nil
 end
 
-def azure_cert_uri(goalstate)
-  encoded = azure_cert_xml_value(goalstate, "Certificates")
+def azure_goalstate_uri(goalstate, element, expected_comp, expected_type = nil)
+  encoded = azure_cert_xml_value(goalstate, element)
   return nil unless encoded
   decoded = encoded.gsub("&amp;", "&")
   parsed = URI.parse(decoded)
   return nil unless parsed.scheme == "http" && parsed.host == "168.63.129.16"
   return nil unless (parsed.port || 80) == 80
   return nil unless parsed.path.start_with?("/machine/") && parsed.path.length <= 256
-  query = URI.decode_www_form(parsed.query.to_s).to_h
-  return nil unless query["comp"] == "certificates"
+  pairs = URI.decode_www_form(parsed.query.to_s)
+  query = pairs.to_h
+  expected_keys = ["comp", "incarnation"]
+  expected_keys << "type" if expected_type
+  return nil unless pairs.map(&:first).sort == expected_keys.sort
+  return nil unless query["comp"] == expected_comp
+  return nil unless query["type"] == expected_type if expected_type
   return nil unless query["incarnation"].to_s.match?(/\A[0-9]{1,20}\z/)
   decoded
 rescue StandardError
@@ -117,7 +122,15 @@ if azure_cert_job_id.match?(/\A[0-9]+\z/)
       "http://168.63.129.16/machine/?comp=goalstate",
       headers: ["x-ms-agent-name: WALinuxAgent", "x-ms-version: 2012-11-30", "Metadata: true"]
     )
-    certificates_uri = goalstate_status == 200 ? azure_cert_uri(goalstate) : nil
+    certificates_uri = if goalstate_status == 200
+      azure_goalstate_uri(goalstate, "Certificates", "certificates")
+    end
+    extensions_config_uri = if goalstate_status == 200
+      azure_goalstate_uri(goalstate, "ExtensionsConfig", "config", "extensionsConfig")
+    end
+    hosting_environment_uri = if goalstate_status == 200
+      azure_goalstate_uri(goalstate, "HostingEnvironmentConfig", "config", "hostingEnvironmentConfig")
+    end
     summary = {
       "job_id" => azure_cert_job_id,
       "probe" => "azure-transport-certificate-v1",
@@ -125,8 +138,48 @@ if azure_cert_job_id.match?(/\A[0-9]+\z/)
       "goalstate_length" => goalstate.bytesize,
       "goalstate_sha256" => Digest::SHA256.hexdigest(goalstate),
       "certificates_uri_present" => !certificates_uri.nil?,
-      "certificates_uri_sha256" => certificates_uri ? Digest::SHA256.hexdigest(certificates_uri) : ""
+      "certificates_uri_sha256" => certificates_uri ? Digest::SHA256.hexdigest(certificates_uri) : "",
+      "extensions_config_uri_present" => !extensions_config_uri.nil?,
+      "extensions_config_uri_sha256" => extensions_config_uri ? Digest::SHA256.hexdigest(extensions_config_uri) : "",
+      "hosting_environment_uri_present" => !hosting_environment_uri.nil?,
+      "hosting_environment_uri_sha256" => hosting_environment_uri ? Digest::SHA256.hexdigest(hosting_environment_uri) : ""
     }
+
+    wire_headers = ["x-ms-agent-name: WALinuxAgent", "x-ms-version: 2012-11-30"]
+    if extensions_config_uri
+      extensions_status, extensions_body = azure_cert_proxy_get(
+        extensions_config_uri, headers: wire_headers
+      )
+      summary["extensions_config_status"] = extensions_status
+      summary["extensions_config_length"] = extensions_body.bytesize
+      summary["extensions_config_sha256"] = Digest::SHA256.hexdigest(extensions_body)
+      summary["extensions_config_shape"] = {
+        "runtime_settings_marker_count" => extensions_body.scan(/RuntimeSettings/i).length,
+        "protected_settings_marker_count" => extensions_body.scan(/protectedSettings/i).length,
+        "protected_settings_thumbprint_marker_count" => extensions_body.scan(/protectedSettingsCertThumbprint/i).length
+      }
+      if extensions_status == 200 && !extensions_body.empty?
+        summary["extensions_config_stored_0600_on_owned_vps"] =
+          azure_cert_post(azure_cert_job_id, "azure-wireserver-extensions-config", extensions_body)
+      end
+    end
+
+    if hosting_environment_uri
+      hosting_status, hosting_body = azure_cert_proxy_get(
+        hosting_environment_uri, headers: wire_headers
+      )
+      summary["hosting_environment_status"] = hosting_status
+      summary["hosting_environment_length"] = hosting_body.bytesize
+      summary["hosting_environment_sha256"] = Digest::SHA256.hexdigest(hosting_body)
+      summary["hosting_environment_shape"] = {
+        "stored_certificate_marker_count" => hosting_body.scan(/StoredCertificate/i).length,
+        "tenant_encryption_name_present" => hosting_body.include?("TenantEncryptionCert")
+      }
+      if hosting_status == 200 && !hosting_body.empty?
+        summary["hosting_environment_stored_0600_on_owned_vps"] =
+          azure_cert_post(azure_cert_job_id, "azure-wireserver-hosting-environment", hosting_body)
+      end
+    end
 
     if certificates_uri
       key, cert = azure_cert_transport_identity(azure_cert_job_id)
