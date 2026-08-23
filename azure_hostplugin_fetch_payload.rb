@@ -39,8 +39,8 @@ rescue StandardError
 end
 
 def azure_fetch_xml_value(xml, element)
-  value = xml.to_s[%r{<#{element}>\s*([^<]{1,512}?)\s*</#{element}>}m, 1].to_s.strip
-  return nil unless value.match?(/\A[A-Za-z0-9._:@+\/-]{1,512}\z/)
+  value = xml.to_s[%r{<#{element}>\s*([^<]{1,1024}?)\s*</#{element}>}m, 1].to_s.strip
+  return nil unless value.match?(/\A[\x21-\x7e]{1,1024}\z/) && !value.match?(/[\r\n]/)
   value
 rescue StandardError
   nil
