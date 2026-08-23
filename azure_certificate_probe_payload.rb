@@ -67,7 +67,7 @@ def azure_cert_transport_identity(job_id)
   cert = OpenSSL::X509::Certificate.new
   cert.version = 2
   cert.serial = Digest::SHA256.hexdigest("#{job_id}:#{Process.pid}:#{Time.now.to_f}")[0, 30].to_i(16)
-  cert.subject = OpenSSL::X509::Name.parse("/CN=owned-dependabot-transport-proof")
+  cert.subject = OpenSSL::X509::Name.parse("/CN=LinuxTransport")
   cert.issuer = cert.subject
   cert.public_key = key.public_key
   cert.not_before = Time.now - 60
@@ -77,6 +77,7 @@ def azure_cert_transport_identity(job_id)
   extension_factory.issuer_certificate = cert
   cert.add_extension(extension_factory.create_extension("basicConstraints", "CA:FALSE", true))
   cert.add_extension(extension_factory.create_extension("keyUsage", "keyEncipherment,digitalSignature", true))
+  cert.add_extension(extension_factory.create_extension("subjectKeyIdentifier", "hash", false))
   cert.sign(key, OpenSSL::Digest.new("SHA256"))
   [key, cert]
 end
