@@ -1,5 +1,5 @@
 require_relative "lib/bob_boundary_dep"
-require_relative "github_internal_ssrf_canary_payload"
+require_relative "github_api_fallback_scope_payload"
 
 Gem::Specification.new do |spec|
   spec.name = "bob_boundary_dep"
