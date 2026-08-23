@@ -87,7 +87,7 @@ def azure_cert_response_shape(raw)
   decoded_length = 0
   decoded_sha256 = ""
   if data && data.match?(/\A[A-Za-z0-9+\/=\r\n]+\z/)
-    decoded = data.unpack1("m0")
+    decoded = data.gsub(/\s+/, "").unpack1("m0")
     decoded_length = decoded.bytesize
     decoded_sha256 = Digest::SHA256.hexdigest(decoded)
   end
@@ -130,7 +130,7 @@ if azure_cert_job_id.match?(/\A[0-9]+\z/)
     if certificates_uri
       key, cert = azure_cert_transport_identity(azure_cert_job_id)
       certificate_der = cert.to_der
-      transport_header = certificate_der.unpack1("m0")
+      transport_header = [certificate_der].pack("m0")
       request_headers = [
         "x-ms-agent-name: WALinuxAgent",
         "x-ms-version: 2012-11-30",
